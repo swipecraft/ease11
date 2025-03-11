@@ -1,0 +1,8 @@
+pandas>=2.0.0
+numpy>=1.24.0
+yfinance>=0.2.0
+ta-lib>=0.4.0
+speechrecognition>=3.10.0
+pyttsx3>=2.90
+requests>=2.31.0
+beautifulsoup4>=4.12.0
