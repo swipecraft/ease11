@@ -1,0 +1,275 @@
+import os
+import logging
+from datetime import datetime, timedelta
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import talib
+import speech_recognition as sr
+import requests
+from bs4 import BeautifulSoup
+import pyttsx3
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Initialize text-to-speech engine
+try:
+    engine = pyttsx3.init()
+except Exception as e:
+    logging.error(f"Failed to initialize text-to-speech: {e}")
+    engine = None
+
+### Real-Time Data Fetching from Yahoo Finance
+def get_realtime_data(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info
+        return {
+            "last_price": info.get("regularMarketPrice", 0),
+            "open": info.get("regularMarketOpen", 0),
+            "high": info.get("regularMarketDayHigh", 0),
+            "low": info.get("regularMarketDayLow", 0),
+            "volume": info.get("regularMarketVolume", 0),
+            "timestamp": datetime.now()
+        }
+    except Exception as e:
+        logging.error(f"Error fetching real-time data for {symbol}: {e}")
+        return {}
+
+### Historical Data Fetching with Caching
+def get_stock_history(symbol, interval="1m", days=30):
+    file_path = f"{symbol}_{interval}.csv"
+    try:
+        if os.path.exists(file_path):
+            df = pd.read_csv(file_path, parse_dates=["Date"])
+            last_date = df["Date"].max()
+            start_date = last_date + timedelta(days=1)
+        else:
+            df = pd.DataFrame()
+            start_date = datetime.now() - timedelta(days=days)
+
+        if start_date >= datetime.now():
+            return df
+
+        stock = yf.Ticker(symbol)
+        new_df = stock.history(interval=interval, start=start_date, end=datetime.now())
+        if new_df.empty:
+            logging.warning(f"No new data for {symbol}")
+            return df
+        new_df = new_df.reset_index().rename(columns={"Date": "date"})
+        new_df.columns = [col.lower() for col in new_df.columns]
+        df = pd.concat([df, new_df], ignore_index=True).drop_duplicates(subset=["date"])
+        df.to_csv(file_path, index=False)
+        logging.info(f"Fetched {len(new_df)} new records for {symbol}")
+        return df
+    except Exception as e:
+        logging.error(f"Error fetching history for {symbol}: {e}")
+        return pd.DataFrame()
+
+### Apply Technical Indicators
+def apply_technical_indicators(df, rsi_period=14, sma_period=50):
+    if df.empty or "close" not in df.columns:
+        return df
+    df["RSI"] = talib.RSI(df["close"], timeperiod=rsi_period)
+    df["SMA"] = talib.SMA(df["close"], timeperiod=sma_period)
+    return df
+
+### Portfolio Analysis and Risk Assessment
+def analyze_portfolio(portfolio):
+    portfolio_value = 0
+    volatilities = []
+    returns = []
+
+    for symbol, shares in portfolio.items():
+        df = get_stock_history(symbol, interval="1d", days=90)
+        if not df.empty:
+            latest = get_realtime_data(symbol)
+            latest_price = latest.get("last_price", 0)
+            if latest_price:
+                position_value = latest_price * shares
+                portfolio_value += position_value
+            df["returns"] = df["close"].pct_change()
+            volatility = df["returns"].std() * np.sqrt(252)
+            avg_return = df["returns"].mean() * 252
+            volatilities.append(volatility)
+            returns.append(avg_return)
+
+    avg_volatility = np.mean(volatilities) if volatilities else 0
+    avg_return = np.mean(returns) if returns else 0
+    risk_score = avg_volatility * 100
+
+    if risk_score < 20:
+        risk_level = "Low"
+        suggestion = "Consider stable stocks or bonds."
+    elif risk_score < 40:
+        risk_level = "Moderate"
+        suggestion = "Balanced mix of growth and stable stocks."
+    else:
+        risk_level = "High"
+        suggestion = "Aggressive growth stocks or options."
+
+    next_trade = suggest_next_trade(portfolio, risk_level)
+    return {
+        "portfolio_value": portfolio_value,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "suggestion": suggestion,
+        "next_trade": next_trade
+    }
+
+def suggest_next_trade(portfolio, risk_level):
+    candidates = ["TCS.NS", "RELIANCE.NS", "HDFCBANK.NS", "INFY.NS"]
+    best_candidate = None
+    best_score = -float("inf")
+
+    for symbol in candidates:
+        if symbol in portfolio:
+            continue
+        df = get_stock_history(symbol, interval="1m", days=30)
+        if not df.empty:
+            df = apply_technical_indicators(df)
+            recommendation = trade_recommendation(df)
+            score = 1 if recommendation == "Buy" else -1 if recommendation == "Sell" else 0
+            if risk_level == "Low" and score > 0:
+                score += 1
+            elif risk_level == "High" and score > 0:
+                score += 2
+            if score > best_score:
+                best_score = score
+                best_candidate = symbol
+
+    return {
+        "symbol": best_candidate,
+        "action": "Buy" if best_score > 0 else "Hold",
+        "quantity": 1
+    } if best_candidate else {"symbol": None, "action": "Hold", "quantity": 0}
+
+### Trade Recommendation
+def trade_recommendation(df):
+    if df.empty or "RSI" not in df.columns:
+        return "No data available."
+    latest = df.iloc[-1]
+    if pd.isna(latest["RSI"]) or pd.isna(latest["SMA"]):
+        return "Hold"
+    if latest["RSI"] < 30 and latest["close"] < latest["SMA"]:
+        return "Buy"
+    elif latest["RSI"] > 70 and latest["close"] > latest["SMA"]:
+        return "Sell"
+    return "Hold"
+
+### Enhanced Backtesting
+def backtest(symbol, slippage=0.001, transaction_cost=0.0001):
+    df = get_stock_history(symbol, interval="1m", days=30)
+    if df.empty:
+        return {"cumulative_return": 0}
+
+    df = apply_technical_indicators(df)
+    df["signal"] = 0
+    df.loc[(df["RSI"] < 30) & (df["close"] < df["SMA"]), "signal"] = 1  # Buy
+    df.loc[(df["RSI"] > 70) & (df["close"] > df["SMA"]), "signal"] = -1  # Sell
+    df["position"] = df["signal"].ffill()
+    df["entry_price"] = df["close"] * (1 + slippage)  # Use current close, not future
+    df["strategy_returns"] = df["position"].shift(1) * (df["close"] / df["entry_price"].shift(1) - 1) - transaction_cost
+
+    wealth = (1 + df["strategy_returns"].dropna()).cumprod()
+    cumulative_return = wealth.iloc[-1] - 1 if not wealth.empty else 0
+    return {"cumulative_return": cumulative_return}
+
+### Voice Command Trading
+def voice_command_trading(symbol, df):
+    recognizer = sr.Recognizer()
+    try:
+        with sr.Microphone() as source:
+            logging.info("🎙 Listening for command...")
+            audio = recognizer.listen(source, timeout=5)
+        command = recognizer.recognize_google(audio).lower()
+        logging.info(f"Recognized: {command}")
+        
+        if "buy" in command:
+            quantity = extract_quantity(command)
+            if trade_recommendation(df) == "Buy" and engine:
+                engine.say(f"Confirm buy {quantity} shares of {symbol}? Say yes or no.")
+                engine.runAndWait()
+                with sr.Microphone() as source:
+                    audio = recognizer.listen(source, timeout=5)
+                if recognizer.recognize_google(audio).lower() == "yes":
+                    logging.info(f"Executing buy order for {quantity} shares of {symbol}")
+                    print(f"Bought {quantity} shares of {symbol}")
+        elif "sell" in command:
+            quantity = extract_quantity(command)
+            if trade_recommendation(df) == "Sell" and engine:
+                engine.say(f"Confirm sell {quantity} shares of {symbol}? Say yes or no.")
+                engine.runAndWait()
+                with sr.Microphone() as source:
+                    audio = recognizer.listen(source, timeout=5)
+                if recognizer.recognize_google(audio).lower() == "yes":
+                    logging.info(f"Executing sell order for {quantity} shares of {symbol}")
+                    print(f"Sold {quantity} shares of {symbol}")
+        elif "balance sheet" in command:
+            fetch_balance_sheet(symbol)
+    except sr.UnknownValueError:
+        logging.error("Could not understand audio.")
+    except sr.RequestError as e:
+        logging.error(f"Speech recognition error: {e}")
+    except Exception as e:
+        logging.error(f"Error with voice command: {e}")
+
+def extract_quantity(command):
+    words = command.split()
+    for word in words:
+        if word.isdigit():
+            return int(word)
+    return 1
+
+### Fetch Balance Sheet (Limited by Scraping)
+def fetch_balance_sheet(symbol):
+    try:
+        url = f"https://www.screener.in/company/{symbol.split('.')[0]}/consolidated/"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table', {'class': 'data-table'})
+        if table:
+            df = pd.read_html(str(table))[0]
+            print(f"\nBalance Sheet for {symbol}:\n{df}")
+            if engine:
+                engine.say(f"Balance sheet for {symbol} fetched successfully.")
+                engine.runAndWait()
+        else:
+            logging.error("Balance sheet table not found.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching balance sheet (possibly 404): {e}")
+    except Exception as e:
+        logging.error(f"Error processing balance sheet: {e}")
+
+### Main Execution
+def main():
+    symbol = input("Enter stock symbol (e.g., TCS.NS): ").strip() or "TCS.NS"
+    portfolio = {"TCS.NS": 10, "RELIANCE.NS": 5}
+
+    real_time_data = get_realtime_data(symbol)
+    print(f"Real-Time Data for {symbol}: {real_time_data}")
+
+    df = get_stock_history(symbol, interval="1m", days=30)
+    df = apply_technical_indicators(df)
+
+    portfolio_analysis = analyze_portfolio(portfolio)
+    print(f"Portfolio Analysis:\n"
+          f"Value: ₹{portfolio_analysis['portfolio_value']:.2f}\n"
+          f"Risk Score: {portfolio_analysis['risk_score']:.2f}\n"
+          f"Risk Level: {portfolio_analysis['risk_level']}\n"
+          f"Suggestion: {portfolio_analysis['suggestion']}\n"
+          f"Next Trade: {portfolio_analysis['next_trade']}")
+
+    metrics = backtest(symbol)
+    print(f"Backtest Cumulative Return: {metrics['cumulative_return']:.2%}")
+
+    recommendation = trade_recommendation(df)
+    print(f"Recommendation: {recommendation}")
+
+    voice_command_trading(symbol, df)
+
+if __name__ == "__main__":
+    main()
