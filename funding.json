@@ -9,7 +9,7 @@
         "description": "We are a group of students pursuing BCA second year where our aim is to build efficient and secure features with adherence to regulations.",
         "webpageUrl": {
             "url": "https://github.com/swipecraft",
-            "wellKnown": "https://github.com/swipecraft/.well-known/funding-manifest-urls"
+            "wellKnown": "https://github.com/swipecraft/ease11/blob/main/.well-known/funding-manifest-urls"
         }
     },
     "projects": [{
